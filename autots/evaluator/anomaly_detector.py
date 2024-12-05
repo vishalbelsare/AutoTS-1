@@ -6,6 +6,7 @@ Created on Mon Jul 18 14:19:55 2022
 """
 import random
 import numpy as np
+import pandas as pd
 from autots.tools.anomaly_utils import (
     anomaly_new_params,
     detect_anomalies,
@@ -39,11 +40,12 @@ class AnomalyDetector(object):
         forecast_params=None,
         method_params={},
         eval_period=None,
+        isolated_only=False,
         n_jobs=1,
     ):
         """Detect anomalies on a historic dataset.
         Note anomaly score patterns vary by method.
-        Anomaly flag is standard -1 = anomaly; 1 = regular
+        Anomaly flag is standard -1 = anomaly; 1 = regular as per sklearn
 
         Args:
             output (str): 'multivariate' (each series unique outliers), or 'univariate' (all series together for one outlier flag per timestamp)
@@ -52,12 +54,14 @@ class AnomalyDetector(object):
             forecast_params (dict): used to backcast and identify 'unforecastable' values, required only for predict_interval method
             method_params (dict): parameters specific to the method, use `.get_new_params()` to see potential models
             eval_periods (int): only use this length tail of data, currently only implemented for forecast_params forecasting if used
+            isolated_only (bool): if True, only standalone anomalies reported
             n_jobs (int): multiprocessing jobs, used by some methods
 
         Methods:
             detect()
             plot()
             get_new_params()
+            score_to_anomaly()  # estimate
 
         Attributes:
             anomalies
@@ -69,7 +73,9 @@ class AnomalyDetector(object):
         self.forecast_params = forecast_params
         self.method_params = method_params
         self.eval_period = eval_period
+        self.isolated_only = isolated_only
         self.n_jobs = n_jobs
+        self.anomaly_classifier = None
 
     def detect(self, df):
         """All will return -1 for anomalies.
@@ -83,9 +89,10 @@ class AnomalyDetector(object):
         self.df_anomaly = df.copy()
         if self.transform_dict is not None:
             model = GeneralTransformer(
-                **self.transform_dict
+                verbose=2, **self.transform_dict
             )  # DATEPART, LOG, SMOOTHING, DIFF, CLIP OUTLIERS with high z score
-            self.df_anomaly = model.fit_transform(self.df_anomaly)
+            # the post selecting by columns is for CenterSplit and any similar renames or expansions
+            self.df_anomaly = model.fit_transform(self.df_anomaly)[self.df.columns]
 
         if self.forecast_params is not None:
             backcast = back_forecast(
@@ -106,6 +113,10 @@ class AnomalyDetector(object):
                 else:
                     self.df_anomaly = self.df_anomaly - backcast.forecast
 
+        if len(self.df_anomaly.columns) != len(df.columns):
+            raise ValueError(
+                f"anomaly returned a column mismatch from params {self.method_params} and {self.transform_dict}"
+            )
         if not all(self.df_anomaly.columns == df.columns):
             self.df_anomaly.columns = df.columns
 
@@ -127,9 +138,16 @@ class AnomalyDetector(object):
                 eval_period=self.eval_period,
                 n_jobs=self.n_jobs,
             )
+        if self.isolated_only:
+            # replace all anomalies (-1) except those which are isolated (1 before and after)
+            mask_minus_one = self.anomalies == -1
+            mask_prev_one = self.anomalies.shift(1) == 1
+            mask_next_one = self.anomalies.shift(-1) == 1
+            mask_replace = mask_minus_one & ~(mask_prev_one & mask_next_one)
+            self.anomalies[mask_replace] = 1
         return self.anomalies, self.scores
 
-    def plot(self, series_name=None, title=None, plot_kwargs={}):
+    def plot(self, series_name=None, title=None, marker_size=None, plot_kwargs={}):
         import matplotlib.pyplot as plt
 
         if series_name is None:
@@ -144,18 +162,73 @@ class AnomalyDetector(object):
             series_anom = self.anomalies[series_name]
             i_anom = series_anom[series_anom == -1].index
         if len(i_anom) > 0:
-            ax.scatter(i_anom.tolist(), self.df.loc[i_anom, :][series_name], c="red")
+            if marker_size is None:
+                marker_size = max(20, fig.dpi * 0.45)
+            ax.scatter(
+                i_anom.tolist(),
+                self.df.loc[i_anom, :][series_name],
+                c="red",
+                s=marker_size,
+            )
 
     def fit(self, df):
         return self.detect(df)
 
+    def fit_anomaly_classifier(self):
+        """Fit a model to predict if a score is an anomaly."""
+        # Using DecisionTree as it should almost handle nonparametric anomalies
+        from sklearn.tree import DecisionTreeClassifier
+
+        scores_flat = self.scores.melt(var_name='series', value_name="value")
+        categor = pd.Categorical(scores_flat['series'])
+        self.score_categories = categor.categories
+        scores_flat['series'] = categor
+        scores_flat = pd.concat(
+            [pd.get_dummies(scores_flat['series']), scores_flat['value']], axis=1
+        )
+        anomalies_flat = self.anomalies.melt(var_name='series', value_name="value")
+        self.anomaly_classifier = DecisionTreeClassifier(max_depth=None).fit(
+            scores_flat, anomalies_flat['value']
+        )
+        # anomaly_classifier.score(scores_flat, anomalies_flat['value'])
+
+    def score_to_anomaly(self, scores):
+        """A DecisionTree model, used as models are nonstandard (and nonparametric)."""
+        if self.anomaly_classifier is None:
+            self.fit_anomaly_classifier()
+        scores.index.name = 'date'
+        scores_flat = scores.reset_index(drop=False).melt(
+            id_vars="date", var_name='series', value_name="value"
+        )
+        scores_flat['series'] = pd.Categorical(
+            scores_flat['series'], categories=self.score_categories
+        )
+        res = self.anomaly_classifier.predict(
+            pd.concat(
+                [
+                    pd.get_dummies(scores_flat['series'], dtype=float),
+                    scores_flat['value'],
+                ],
+                axis=1,
+            )
+        )
+        res = pd.concat(
+            [scores_flat[['date', "series"]], pd.Series(res, name='value')], axis=1
+        ).pivot_table(index='date', columns='series', values="value")
+        return res[scores.columns]
+
     @staticmethod
     def get_new_params(method="random"):
+        """Generate random new parameter combinations.
+
+        Args:
+            method (str): 'fast', 'deep', 'default', or any of the anomaly method names (ie 'IQR') to specify only that method
+        """
         forecast_params = None
         method_choice, method_params, transform_dict = anomaly_new_params(method=method)
         if transform_dict == "random":
             transform_dict = RandomTransform(
-                transformer_list='fast', transformer_max_depth=2
+                transformer_list='scalable', transformer_max_depth=2
             )
         if method == "fast":
             preforecast = False
@@ -164,8 +237,8 @@ class AnomalyDetector(object):
 
         if preforecast or method_choice == "prediction_interval":
             forecast_params = random_model(
-                model_list=['LastValueNaive', 'GLS', 'RRVAR'],
-                model_prob=[0.8, 0.1, 0.1],
+                model_list=['LastValueNaive', 'GLS', 'RRVAR', "SeasonalityMotif"],
+                model_prob=[0.8, 0.1, 0.05, 0.05],
                 transformer_max_depth=5,
                 transformer_list="superfast",
                 keyword_format=True,
@@ -190,8 +263,9 @@ class HolidayDetector(object):
         use_wkdeom_holidays=True,
         use_lunar_holidays=True,
         use_lunar_weekday=False,
-        use_islamic_holidays=True,
-        use_hebrew_holidays=True,
+        use_islamic_holidays=False,
+        use_hebrew_holidays=False,
+        use_hindu_holidays=False,
         output: str = "multivariate",
         n_jobs: int = 1,
     ):
@@ -226,6 +300,7 @@ class HolidayDetector(object):
         self.use_lunar_weekday = use_lunar_weekday
         self.use_islamic_holidays = use_islamic_holidays
         self.use_hebrew_holidays = use_hebrew_holidays
+        self.use_hindu_holidays = use_hindu_holidays
         self.n_jobs = n_jobs
         self.output = output
         self.anomaly_model = AnomalyDetector(
@@ -235,6 +310,8 @@ class HolidayDetector(object):
     def detect(self, df):
         """Run holiday detection. Input wide-style pandas time series."""
         self.anomaly_model.detect(df)
+        self.df = df
+        self.df_cols = df.columns
         if np.min(self.anomaly_model.anomalies.values) != -1:
             print("No anomalies detected.")
         (
@@ -245,14 +322,15 @@ class HolidayDetector(object):
             self.lunar_weekday,
             self.islamic_holidays,
             self.hebrew_holidays,
+            self.hindu_holidays,
         ) = anomaly_df_to_holidays(
             self.anomaly_model.anomalies,
             splash_threshold=self.splash_threshold,
             threshold=self.threshold,
             actuals=df if self.output != "univariate" else None,
-            anomaly_scores=self.anomaly_model.scores
-            if self.output != "univariate"
-            else None,
+            anomaly_scores=(
+                self.anomaly_model.scores if self.output != "univariate" else None
+            ),
             use_dayofmonth_holidays=self.use_dayofmonth_holidays,
             use_wkdom_holidays=self.use_wkdom_holidays,
             use_wkdeom_holidays=self.use_wkdeom_holidays,
@@ -260,20 +338,28 @@ class HolidayDetector(object):
             use_lunar_weekday=self.use_lunar_weekday,
             use_islamic_holidays=self.use_islamic_holidays,
             use_hebrew_holidays=self.use_hebrew_holidays,
+            use_hindu_holidays=self.use_hindu_holidays,
         )
-        self.df = df
-        self.df_cols = df.columns
 
     def plot_anomaly(self, kwargs={}):
         self.anomaly_model.plot(**kwargs)
 
     def plot(
-        self, series_name=None, include_anomalies=True, title=None, plot_kwargs={}
+        self,
+        series_name=None,
+        include_anomalies=True,
+        title=None,
+        marker_size=None,
+        plot_kwargs={},
+        series=None,
     ):
         import matplotlib.pyplot as plt
 
         if series_name is None:
-            series_name = random.choice(self.df.columns)
+            if series is not None:
+                series_name = series
+            else:
+                series_name = random.choice(self.df.columns)
         if title is None:
             title = (
                 series_name[0:50]
@@ -281,6 +367,8 @@ class HolidayDetector(object):
             )
         fig, ax = plt.subplots()
         self.df[series_name].plot(ax=ax, title=title, **plot_kwargs)
+        if marker_size is None:
+            marker_size = max(20, fig.dpi * 0.45)
         if include_anomalies:
             # directly copied from above
             if self.anomaly_model.output == "univariate":
@@ -292,13 +380,21 @@ class HolidayDetector(object):
                 i_anom = series_anom[series_anom == -1].index
             if len(i_anom) > 0:
                 ax.scatter(
-                    i_anom.tolist(), self.df.loc[i_anom, :][series_name], c="red"
+                    i_anom.tolist(),
+                    self.df.loc[i_anom, :][series_name],
+                    c="red",
+                    s=marker_size,
                 )
         # now the actual holidays
         i_anom = self.dates_to_holidays(self.df.index, style="series_flag")[series_name]
         i_anom = i_anom.index[i_anom == 1]
         if len(i_anom) > 0:
-            ax.scatter(i_anom.tolist(), self.df.loc[i_anom, :][series_name], c="green")
+            ax.scatter(
+                i_anom.tolist(),
+                self.df.loc[i_anom, :][series_name],
+                c="green",
+                s=marker_size,
+            )
 
     def dates_to_holidays(self, dates, style="flag", holiday_impacts=False):
         """Populate date information for a given pd.DatetimeIndex.
@@ -326,6 +422,7 @@ class HolidayDetector(object):
             lunar_weekday=self.lunar_weekday,
             islamic_holidays=self.islamic_holidays,
             hebrew_holidays=self.hebrew_holidays,
+            hindu_holidays=self.hindu_holidays,
         )
 
     def fit(self, df):

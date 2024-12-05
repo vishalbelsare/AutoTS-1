@@ -20,6 +20,7 @@ from autots.tools.calendar import (
     gregorian_to_chinese,
     gregorian_to_islamic,
     gregorian_to_hebrew,
+    gregorian_to_hindu,
 )
 
 
@@ -34,7 +35,9 @@ try:
     from sklearn.ensemble import IsolationForest
     from sklearn.neighbors import LocalOutlierFactor
     from sklearn.covariance import EllipticEnvelope
-    from scipy.stats import chi2, norm, gamma, uniform
+    from sklearn.svm import OneClassSVM
+    from sklearn.mixture import GaussianMixture
+    from scipy.stats import chi2, norm, gamma, uniform, laplace, cauchy, beta
 except Exception:
     pass
 
@@ -49,12 +52,25 @@ def sk_outliers(df, method, method_params={}):
         model = LocalOutlierFactor(n_jobs=1, **method_params)  # n_neighbors=5
         res = model.fit_predict(df)
         scores = model.negative_outlier_factor_ + 1.45
+    elif method == "OneClassSVM":
+        model = OneClassSVM(**method_params)  # n_neighbors=5
+        res = model.fit_predict(df)
+        scores = model.decision_function(df)
     elif method == "EE":
         if method_params['contamination'] == "auto":
             method_params['contamination'] = 0.1
         model = EllipticEnvelope(**method_params)
         res = model.fit_predict(df)
         scores = model.decision_function(df)
+    elif method == "GaussianMixture":
+        model = GaussianMixture(**method_params)
+        model.fit(df)
+        scores = -model.score_samples(df)
+        responsibilities = model.predict_proba(df)
+        max_responsibilities = responsibilities.max(axis=1)
+        threshold = 0.05
+        res = np.where(max_responsibilities < threshold, -1, 1)
+        # res = np.where(scores > np.percentile(scores, 95), -1, 1)
     return pd.DataFrame({"anomaly": res}, index=df.index), pd.DataFrame(
         {"anomaly_score": scores}, index=df.index
     )
@@ -127,6 +143,12 @@ def zscore_survival_function(
     elif method == "mad":
         median_diff = np.abs((df - df.median(axis=0)))
         residual_score = median_diff / median_diff.mean(axis=0)
+    elif method == "med_diff":
+        median_diff = df.diff().median()
+        residual_score = (df.diff().fillna(0) / median_diff).abs()
+    elif method == "max_diff":
+        max_diff = df.diff().max()
+        residual_score = (df.diff().fillna(0) / max_diff).abs()
     else:
         raise ValueError("zscore method not recognized")
 
@@ -149,10 +171,20 @@ def zscore_survival_function(
         return pd.DataFrame(
             gamma.sf(residual_score, dof), index=df.index, columns=columns
         )
+    elif distribution == "beta":
+        return pd.DataFrame(
+            beta.sf(residual_score, 0.5, 2, scale=dof), index=df.index, columns=columns
+        )
     elif distribution == "chi2":
         return pd.DataFrame(
             chi2.sf(residual_score, dof), index=df.index, columns=columns
         )
+    elif distribution == "cauchy":
+        return pd.DataFrame(
+            cauchy.sf(residual_score, dof), index=df.index, columns=columns
+        )
+    elif distribution == "laplace":
+        return pd.DataFrame(laplace.sf(residual_score), index=df.index, columns=columns)
     elif distribution == "uniform":
         return pd.DataFrame(
             uniform.sf(residual_score, dof), index=df.index, columns=columns
@@ -222,7 +254,13 @@ def values_to_anomalies(df, output, threshold_method, method_params, n_jobs=1):
                 columns=cols,
             )
         return res, scores
-    elif threshold_method in ["zscore", "rolling_zscore", "mad"]:
+    elif threshold_method in [
+        "zscore",
+        "rolling_zscore",
+        "mad",
+        "med_diff",
+        "max_diff",
+    ]:
         alpha = method_params.get("alpha", 0.05)
         distribution = method_params.get("distribution", "norm")
         rolling_periods = method_params.get("rolling_periods", 200)
@@ -377,13 +415,22 @@ def detect_anomalies(
         df_anomaly = model.fit_transform(df_anomaly)
     """
 
-    if method in ["IsolationForest", "LOF", "EE"]:
+    if method in ["IsolationForest", "LOF", "EE", "OneClassSVM", "GaussianMixture"]:
         if output == "univariate":
             res, scores = sk_outliers(df_anomaly, method, method_params)
         else:
             res, scores = loop_sk_outliers(df_anomaly, method, method_params, n_jobs)
-    elif method in ["zscore", "rolling_zscore", "mad", "minmax"]:
+    elif method in [
+        "zscore",
+        "rolling_zscore",
+        "mad",
+        "minmax",
+        "med_diff",
+        "max_diff",
+    ]:
         res, scores = values_to_anomalies(df_anomaly, output, method, method_params)
+    elif method == "GaussianMixtureBase":
+        res, scores = gaussian_mixture(df, **method_params)
     elif method in ["IQR"]:
         iqr_thresh = method_params.get("iqr_threshold", 2.0)
         iqr_quantiles = method_params.get("iqr_quantiles", [0.25, 0.75])
@@ -399,7 +446,7 @@ def detect_anomalies(
             upper_limit=limit_1,
             lower_limit=limit_0,
         )
-    elif method in "nonparametric":
+    elif method in ["nonparametric"]:
         res, scores = values_to_anomalies(
             df_anomaly,
             output,
@@ -418,9 +465,11 @@ def detect_anomalies(
 
 
 available_methods = [
-    "IsolationForest",
-    "LOF",
-    "EE",
+    "IsolationForest",  # (sklearn)
+    "LOF",  # Local Outlier Factor (sklearn)
+    "EE",  # Elliptical Envelope (sklearn)
+    "OneClassSVM",
+    "GaussianMixture",
     "zscore",
     "rolling_zscore",
     "mad",
@@ -428,6 +477,9 @@ available_methods = [
     "prediction_interval",  # ridiculously slow
     "IQR",
     "nonparametric",
+    "med_diff",
+    "max_diff",
+    # "GaussianMixtureBase",
 ]
 fast_methods = [
     "zscore",
@@ -436,6 +488,8 @@ fast_methods = [
     "minmax",
     "IQR",
     "nonparametric",
+    "med_diff",
+    "max_diff",
 ]
 
 
@@ -443,24 +497,31 @@ def anomaly_new_params(method='random'):
     if method == "deep":
         method_choice = random.choices(
             available_methods,
-            [0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.05, 0.1, 0.1, 0.15],
+            [0.1, 0.1, 0.1, 0.1, 0.1, 0.05, 0.1, 0.1, 0.15, 0.1, 0.1, 0.1, 0.1, 0.1],
         )[0]
     elif method == "fast":
-        method_choice = random.choices(fast_methods, [0.4, 0.3, 0.1, 0.1, 0.4, 0.05])[0]
+        method_choice = random.choices(
+            fast_methods, [0.4, 0.3, 0.1, 0.1, 0.4, 0.05, 0.1, 0.1]
+        )[0]
+    elif method in available_methods:
+        method_choice = method
     else:
         method_choice = random.choices(
             [
                 "LOF",
                 "EE",
                 "zscore",
-                "rolling_zscore",
+                "rolling_zscore",  # Matt likes this one best
                 "mad",
                 "minmax",
                 "IQR",
                 "nonparametric",
                 "IsolationForest",
+                # "OneClassSVM",  # seems too slow at times
+                "GaussianMixture",
+                # "GaussianMixtureBase",
             ],  # Isolation Forest is good but slower (parallelized also)
-            [0.05, 0.1, 0.25, 0.25, 0.1, 0.1, 0.2, 0.1, 0.05],
+            [0.05, 0.1, 0.25, 0.3, 0.1, 0.1, 0.2, 0.1, 0.05, 0.05],
         )[0]
 
     if method_choice == "IsolationForest":
@@ -478,6 +539,18 @@ def anomaly_new_params(method='random'):
             'n_neighbors': random.choices([3, 5, 10, 20], [0.3, 0.4, 0.3, 0.1])[0],
             'metric': random.choices(['minkowski', 'canberra'], [0.9, 0.1])[0],
         }
+    elif method_choice == "OneClassSVM":
+        method_params = {
+            'kernel': random.choices(
+                ['linear', "poly", "rbf", "sigmoid"], [0.1, 0.1, 0.4, 0.1]
+            )[0],
+            'degree': random.choices([3, 5, 10, 20], [0.3, 0.4, 0.3, 0.1])[0],
+            'gamma': random.choices(['scale', 'auto'], [0.5, 0.5])[0],
+            'shrinking': random.choices([True, False], [0.5, 0.5])[0],
+            'nu': random.choices([0.3, 0.5, 0.7, 0.9, 0.1], [0.3, 0.5, 0.3, 0.1, 0.1])[
+                0
+            ],
+        }
     elif method_choice == "EE":
         method_params = {
             'contamination': random.choices(
@@ -486,21 +559,57 @@ def anomaly_new_params(method='random'):
             'assume_centered': random.choices([False, True], [0.9, 0.1])[0],
             'support_fraction': random.choices([None, 0.2, 0.8], [0.9, 0.1, 0.1])[0],
         }
+    elif method_choice == "GaussianMixture":
+        method_params = {
+            'n_components': random.choices([2, 3, 4, 5], [0.2, 0.3, 0.3, 0.2])[0],
+            'covariance_type': random.choices(
+                ['full', 'tied', 'diag', 'spherical'], [0.4, 0.3, 0.2, 0.1]
+            )[0],
+            'tol': random.choices([1e-3, 1e-4, 1e-5], [0.5, 0.3, 0.2])[0],
+            'reg_covar': random.choices([1e-6, 1e-5, 1e-4], [0.3, 0.4, 0.3])[0],
+            'max_iter': random.choices([100, 200, 300], [0.3, 0.4, 0.3])[0],
+        }
+    elif method_choice == "GaussianMixtureBase":
+        method_params = {
+            'n_components': random.choices([2, 3, 4, 5], [0.2, 0.3, 0.3, 0.2])[0],
+            'tol': random.choices([1e-3, 1e-4, 1e-5], [0.5, 0.3, 0.2])[0],
+            'max_iter': random.choices([50, 100, 200], [0.3, 0.5, 0.2])[0],
+            "responsibility_threshold": random.choices(
+                [0.05, 0.01, 0.1], [0.3, 0.2, 0.2]
+            )[0],
+        }
     elif method_choice == "zscore":
         method_params = {
             'distribution': random.choices(
-                ['norm', 'gamma', 'chi2', 'uniform'], [0.4, 0.2, 0.2, 0.2]
+                ['norm', 'gamma', 'chi2', 'uniform', "laplace", "cauchy"],
+                [0.4, 0.2, 0.3, 0.2, 0.05, 0.05],
             )[0],
-            'alpha': random.choices([0.03, 0.05, 0.1], [0.1, 0.8, 0.1])[0],
+            'alpha': random.choices(
+                [0.02, 0.03, 0.05, 0.08, 0.1, 0.12, 0.14],
+                [0.005, 0.1, 0.6, 0.1, 0.2, 0.05, 0.05],
+            )[0],
         }
     elif method_choice == "rolling_zscore":
         method_params = {
             'distribution': random.choices(
-                ['norm', 'gamma', 'chi2', 'uniform'], [0.4, 0.2, 0.2, 0.2]
+                ['norm', 'gamma', 'chi2', 'uniform', "laplace", "cauchy"],
+                [0.4, 0.2, 0.2, 0.2, 0.1, 0.1],
             )[0],
-            'alpha': random.choices([0.03, 0.05, 0.1], [0.1, 0.8, 0.1])[0],
+            'alpha': random.choices(
+                [0.01, 0.03, 0.05, 0.1, 0.2, 0.4], [0.1, 0.1, 0.8, 0.1, 0.1, 0.01]
+            )[0],
             'rolling_periods': random.choice([28, 90, 200, 300]),
             'center': random.choice([True, False]),
+        }
+    elif method_choice in ["med_diff", "max_diff"]:
+        method_params = {
+            'distribution': random.choices(
+                ['norm', 'gamma', 'chi2', 'uniform', "laplace", "cauchy", "beta"],
+                [0.4, 0.3, 0.2, 0.2, 0.1, 0.1, 0.1],
+            )[0],
+            'alpha': random.choices(
+                [0.01, 0.03, 0.05, 0.1, 0.2, 0.6], [0.1, 0.1, 0.8, 0.1, 0.1, 0.05]
+            )[0],
         }
     elif method_choice == "mad":
         method_params = {
@@ -516,10 +625,13 @@ def anomaly_new_params(method='random'):
     elif method_choice == "prediction_interval":
         method_params = {"prediction_interval": random.choice([0.9, 0.99])}
     elif method_choice == "IQR":
+        iqr_threshold = random.choices(
+            [1.5, 2.0, 2.5, 3.0, 'other'], [0.1, 0.2, 0.2, 0.2, 0.1]
+        )[0]
+        if iqr_threshold == "other":
+            iqr_threshold = random.randint(2, 5) + (random.randint(0, 10) / 10)
         method_params = {
-            'iqr_threshold': random.choices([1.5, 2.0, 2.5, 3.0], [0.1, 0.4, 0.2, 0.1])[
-                0
-            ],
+            'iqr_threshold': iqr_threshold,
             'iqr_quantiles': random.choices([[0.25, 0.75], [0.4, 0.6]], [0.8, 0.2])[0],
         }
     elif method_choice == "nonparametric":
@@ -632,6 +744,7 @@ def anomaly_df_to_holidays(
     use_lunar_weekday=False,
     use_islamic_holidays=False,
     use_hebrew_holidays=False,
+    use_hindu_holidays=False,
 ):
     if isinstance(anomaly_df, pd.Series):
         stacked = anomaly_df.copy()  # [anomaly_df == -1]
@@ -652,25 +765,33 @@ def anomaly_df_to_holidays(
         stacked.where(stacked == -1, 0).abs().rename_axis(index=['date', 'series'])
     )
     agg_dict = {"count": 'sum', "occurrence_rate": 'mean'}
+    if isinstance(stacked, pd.Series):
+        stacked = stacked.to_frame()
     if actuals is not None:
-        stacked = stacked.to_frame().merge(
-            actuals.stack().rename("avg_value").rename_axis(index=['date', 'series']),
-            left_index=True,
-            right_index=True,
+        mod_act = (
+            actuals.stack().rename("avg_value").rename_axis(index=['date', 'series'])
         )
+        # stacked = stacked.merge(mod_act, left_index=True, right_index=True)
+        # I am not sure if these indexes will always be aligned, could be the source of trouble
+        stacked = pd.concat([stacked, mod_act], axis=1)
         agg_dict['avg_value'] = 'mean'
     if anomaly_scores is not None:
-        stacked = pd.DataFrame(stacked).merge(
+        mod_anom = (
             anomaly_scores.stack()
             .rename("avg_anomaly_score")
-            .rename_axis(index=['date', 'series']),
-            left_index=True,
-            right_index=True,
+            .rename_axis(index=['date', 'series'])
         )
+        # print(f"mod_anom shape {mod_anom.shape}, stacked shape {stacked.shape} and {mod_anom.index} and {stacked.index}")
+        # stacked = stacked.merge(mod_anom, left_index=True, right_index=True)
+        stacked = pd.concat([stacked, mod_anom], axis=1)
         agg_dict['avg_anomaly_score'] = 'mean'
 
     dates = stacked.index.get_level_values('date').unique()
-    year_range = dates.year.max() - dates.year.min() + 1
+    try:
+        year_range = dates.year.max() - dates.year.min() + 1
+    except Exception as e:
+        raise Exception(f"unrecognized dates: {dates}") from e
+
     if year_range <= 1:
         raise ValueError("more than 1 year of data is required for holiday detection.")
 
@@ -711,12 +832,16 @@ def anomaly_df_to_holidays(
                 'dom_12_25': "Christmas",
                 'dom_12_26': "BoxingDay",
                 'dom_12_24': "ChristmasEve",
+                'dom_07_01': "CanadaDay",
                 'dom_07_04': "July4th",
+                'dom_07_14': "BastilleDay",
+                'dom_01_26': "RDIndia_AustraliaDay",
                 'dom_01_01': "NewYearsDay",
                 'dom_12_31': "NewYearsEve",
                 'dom_02_14': 'ValentinesDay',
                 'dom_10-31': 'Halloween',
                 'dom_11-11': 'ArmisticeDay',
+                "dom_04_22": "EarthDay",
             }
         )
     else:
@@ -889,6 +1014,36 @@ def anomaly_df_to_holidays(
         )
     else:
         hebrew_holidays = None
+    if use_hindu_holidays:
+        hindu_df = gregorian_to_hindu(dates)
+        hindu_df.index.name = "date"
+        hindu_df = hindu_df.merge(
+            stacked, left_index=True, right_index=True, how="outer"
+        )
+        hindu_df['occurrence_rate'] = hindu_df['count']
+
+        # Group by Hindu calendar components to find significant dates
+        hindu_holidays = (
+            hindu_df.groupby(["series", "hindu_month_number", "lunar_day"])
+            .agg(agg_dict)
+            .loc[
+                lambda df: (df["occurrence_rate"] >= threshold)
+                & (df["count"] >= min_occurrences),
+            ]
+        ).reset_index(drop=False)
+
+        hindu_holidays['holiday_name'] = (
+            'hindu_'
+            + hindu_holidays['hindu_month_number']
+            .astype(str)
+            .str.pad(2, side='left', fillchar="0")
+            + "_"
+            + hindu_holidays['lunar_day']
+            .astype(str)
+            .str.pad(2, side='left', fillchar="0")
+        )
+    else:
+        hindu_holidays = None
     return (
         day_holidays,
         wkdom_holidays,
@@ -897,6 +1052,7 @@ def anomaly_df_to_holidays(
         lunar_weekday,
         islamic_holidays,
         hebrew_holidays,
+        hindu_holidays,
     )
 
 
@@ -912,6 +1068,8 @@ def dates_to_holidays(
     lunar_weekday=None,
     islamic_holidays=None,
     hebrew_holidays=None,
+    hindu_holidays=None,
+    max_features: int = None,
 ):
     """Populate date information for a given pd.DatetimeIndex.
 
@@ -943,9 +1101,32 @@ def dates_to_holidays(
         lunar_weekday,
         islamic_holidays,
         hebrew_holidays,
+        hindu_holidays,
     ]:
         if holiday_df is not None:
             if not holiday_df.empty:
+                # various memory usage reduction is done by drop_duplicates, drop(columns)
+                if style == 'flag':
+                    # this might overwrite upstream holiday. If using multiple styles, problem
+                    holiday_df = holiday_df.drop_duplicates(
+                        subset=holiday_df.columns.difference(
+                            [
+                                'series',
+                                'count',
+                                'occurrence_rate',
+                                'avg_value',
+                                'avg_anomaly_score',
+                            ]
+                        )
+                    )
+                    drop_colz = [
+                        'count',
+                        'occurrence_rate',
+                        'avg_value',
+                        'avg_anomaly_score',
+                    ]
+                else:
+                    drop_colz = ['count', 'occurrence_rate']
                 # handle the different holiday calendars
                 if "lunar_month" in holiday_df.columns:
                     lunar_dates = gregorian_to_chinese(dates)
@@ -957,8 +1138,33 @@ def dates_to_holidays(
                         lunar_dates['dayofweek'] = lunar_dates.index.dayofweek
                     else:
                         on = ["lunar_month", "lunar_day"]
-                    populated_holidays = lunar_dates.reset_index(drop=False).merge(
-                        holiday_df, on=on, how="left"
+                    populated_holidays = (
+                        lunar_dates.reset_index(drop=False)
+                        .drop(columns=lunar_dates.columns.difference(on + ['date']))
+                        .merge(
+                            holiday_df.drop(columns=drop_colz, errors='ignore'),
+                            on=on,
+                            how="left",
+                        )
+                    )
+                elif "hindu_month_number" in holiday_df.columns:
+                    lunar_dates = gregorian_to_hindu(dates)
+                    if "weekofmonth" in holiday_df.columns:
+                        on = ["hindu_month_number", "lunar_day", 'weekofmonth']
+                        lunar_dates["weekofmonth"] = (
+                            lunar_dates["lunar_day"] - 1
+                        ) // 7 + 1
+                        lunar_dates['dayofweek'] = lunar_dates.index.dayofweek
+                    else:
+                        on = ["hindu_month_number", "lunar_day"]
+                    populated_holidays = (
+                        lunar_dates.reset_index(drop=False)
+                        .drop(columns=lunar_dates.columns.difference(on + ['date']))
+                        .merge(
+                            holiday_df.drop(columns=drop_colz, errors='ignore'),
+                            on=on,
+                            how="left",
+                        )
                     )
                 else:
                     on = ['month', 'day']
@@ -968,26 +1174,88 @@ def dates_to_holidays(
                         on = ["month", "weekfromend", "dayofweek"]
                     sample = holiday_df['holiday_name'].iloc[0]
                     if "hebrew" in sample:
+                        hdates = gregorian_to_hebrew(dates)
                         populated_holidays = (
-                            gregorian_to_hebrew(dates)
+                            hdates.drop(
+                                columns=hdates.columns.difference(on + ['date']),
+                                errors='ignore',
+                            )
                             .reset_index(drop=False)
-                            .merge(holiday_df, on=on, how="left")
+                            .merge(
+                                holiday_df.drop(columns=drop_colz, errors='ignore'),
+                                on=on,
+                                how="left",
+                            )
                         )
                     elif "islamic" in sample:
+                        idates = gregorian_to_islamic(dates)
                         populated_holidays = (
-                            gregorian_to_islamic(dates)
+                            idates.drop(
+                                columns=idates.columns.difference(on + ['date']),
+                                errors='ignore',
+                            )
                             .reset_index(drop=False)
-                            .merge(holiday_df, on=on, how="left")
+                            .merge(
+                                holiday_df.drop(columns=drop_colz, errors='ignore'),
+                                on=on,
+                                how="left",
+                            )
+                        )
+                    elif "hindu" in sample:
+                        idates = gregorian_to_hindu(dates)
+                        populated_holidays = (
+                            idates.drop(
+                                columns=idates.columns.difference(on + ['date']),
+                                errors='ignore',
+                            )
+                            .reset_index(drop=False)
+                            .merge(
+                                holiday_df.drop(columns=drop_colz, errors='ignore'),
+                                on=on,
+                                how="left",
+                            )
                         )
                     else:
-                        populated_holidays = dates_df.merge(
-                            holiday_df, on=on, how="left"
+                        populated_holidays = dates_df.drop(
+                            columns=dates_df.columns.difference(on + ['date'])
+                        ).merge(
+                            holiday_df.drop(columns=drop_colz, errors='ignore'),
+                            on=on,
+                            how="left",
                         )
                 # reorg results depending on style
                 if style == "flag":
-                    result_per_holiday = pd.get_dummies(
-                        populated_holidays['holiday_name']
+                    populated_holidays = populated_holidays.drop_duplicates(
+                        subset=['date', 'holiday_name']
                     )
+                    populated_holidays['holiday_name'] = pd.Categorical(
+                        populated_holidays['holiday_name'],
+                        categories=holiday_df['holiday_name'].unique(),
+                        ordered=True,
+                    )
+                    if max_features is not None:
+                        # rarest first
+                        frequent_categories = (
+                            populated_holidays['holiday_name']
+                            .value_counts(ascending=True)
+                            .index[:max_features]
+                        )
+                        populated_holidays['holiday_name'] = populated_holidays[
+                            'holiday_name'
+                        ].apply(lambda x: x if x in frequent_categories else 'Other')
+                    result_per_holiday = pd.get_dummies(
+                        populated_holidays['holiday_name'],
+                        dtype=float,
+                    )
+                    """
+                    lb = LabelBinarizer()
+                    result_per_holiday = pd.DataFrame(
+                        lb.fit_transform(populated_holidays['holiday_name']),
+                        # columns=lb.classes_, 
+                        index=populated_holidays.index
+                    )
+                    """
+                    # result_per_holiday = populated_holidays['holiday_name'].astype('category').cat.codes
                     result_per_holiday.index = populated_holidays['date']
                     result.append(result_per_holiday.groupby(level=0).sum())
                 elif style in ["impact", 'series_flag']:
@@ -995,7 +1263,7 @@ def dates_to_holidays(
                         index='date', columns='series', values='holiday_name'
                     ).reindex(columns=df_cols)
                     if style == "series_flag":
-                        result = result + temp.where(temp.isnull(), 1).fillna(0)
+                        result = result + temp.where(temp.isnull(), 1).fillna(0.0)
                     else:
                         if isinstance(holiday_impacts, dict):
                             result = result + temp.replace(holiday_impacts).astype(
@@ -1033,17 +1301,20 @@ def dates_to_holidays(
                     result.append(populated_holidays)
     if isinstance(result, list):
         if not result:
-            return pd.DataFrame(
-                columns=[
-                    'ds',
-                    'date',
-                    'holiday',
-                    'holiday_name',
-                    'series',
-                    'lower_window',
-                    'upper_window',
-                ]
-            )
+            if style == "flag":
+                return pd.DataFrame(index=dates)
+            else:
+                return pd.DataFrame(
+                    columns=[
+                        'ds',
+                        'date',
+                        'holiday',
+                        'holiday_name',
+                        'series',
+                        'lower_window',
+                        'upper_window',
+                    ]
+                )
     if style in ['long', 'prophet']:
         result = pd.concat(result, axis=0)
     elif style == "flag":
@@ -1078,4 +1349,86 @@ def holiday_new_params(method='random'):
         'use_lunar_weekday': random.choices([True, False], [0.05, 0.95])[0],
         'use_islamic_holidays': random.choices([True, False], [0.1, 0.9])[0],
         'use_hebrew_holidays': random.choices([True, False], [0.1, 0.9])[0],
+        'use_hindu_holidays': random.choices([True, False], [0.1, 0.9])[0],
     }
+
+
+def gaussian_mixture(
+    df, n_components=2, tol=1e-3, max_iter=100, responsibility_threshold=0.05
+):
+    from scipy.stats import multivariate_normal
+
+    n, d = df.shape
+    data = df.fillna(0).to_numpy()
+
+    # Normalize the data
+    data = (data - np.mean(data, axis=0)) / np.std(data, axis=0)
+
+    np.random.seed(42)
+    means = np.random.rand(n_components, d)
+    covariances = np.array([np.eye(d)] * n_components)
+    weights = np.ones(n_components) / n_components
+
+    log_likelihood = -np.inf
+
+    for iteration in range(max_iter):
+        # E-step: compute responsibilities
+        responsibilities = np.zeros((n, n_components))
+
+        for i in range(n_components):
+            responsibilities[:, i] = weights[i] * multivariate_normal.pdf(
+                data, means[i], covariances[i]
+            )
+
+        sum_responsibilities = responsibilities.sum(axis=1)[:, np.newaxis]
+        responsibilities /= sum_responsibilities
+
+        # M-step: update parameters
+        Nk = responsibilities.sum(axis=0)
+
+        for i in range(n_components):
+            means[i] = (responsibilities[:, i][:, np.newaxis] * data).sum(axis=0) / Nk[
+                i
+            ]
+            diff = data - means[i]
+            covariances[i] = (
+                (responsibilities[:, i][:, np.newaxis] * diff).T @ diff / Nk[i]
+            )
+            covariances[i] += (tol * 10) * np.eye(d)  # Increased regularization
+
+            # Check for invalid values in covariance matrix
+            if np.any(np.isnan(covariances[i])) or np.any(np.isinf(covariances[i])):
+                raise ValueError(
+                    f"Covariance matrix for component {i} contains NaNs or infs"
+                )
+
+        weights = Nk / n
+
+        # Compute log-likelihood and check convergence
+        new_log_likelihood = np.sum(np.log(responsibilities.sum(axis=1)))
+
+        if np.abs(new_log_likelihood - log_likelihood) < tol:
+            break
+
+        log_likelihood = new_log_likelihood
+
+    # Calculate anomaly scores using responsibility threshold
+    max_responsibilities = responsibilities.max(axis=1)
+
+    # Identify anomalies: low responsibility indicates a higher likelihood of being an anomaly
+    anomalies = pd.DataFrame(
+        np.where(max_responsibilities < responsibility_threshold, -1, 1),
+        index=df.index,
+        columns=['anomaly'],
+    )
+
+    # Score: can still calculate log-likelihood-based scores per data point if needed
+    scores = np.zeros((n, d))
+    for i in range(n_components):
+        comp_pdf = multivariate_normal.pdf(data, means[i], covariances[i])
+        comp_scores = -np.log(comp_pdf).reshape(-1, 1)
+        scores += responsibilities[:, i][:, np.newaxis] * comp_scores
+
+    scores = pd.DataFrame(scores, index=df.index, columns=df.columns)
+
+    return anomalies, scores

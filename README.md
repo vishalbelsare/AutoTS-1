@@ -4,6 +4,8 @@
 
 AutoTS is a time series package for Python designed for rapidly deploying high-accuracy forecasts at scale. 
 
+In 2023, AutoTS won in the M6 forecasting competition, delivering the highest performance investment decisions across 12 months of stock market forecasting.
+
 There are dozens of forecasting models usable in the `sklearn` style of `.fit()` and `.predict()`. 
 These includes naive, statistical, machine learning, and deep learning models. 
 Additionally, there are over 30 time series specific transforms usable in the `sklearn` style of `.fit()`, `.transform()` and `.inverse_transform()`. 
@@ -23,6 +25,7 @@ A combination of metrics and cross-validation options, the ability to apply subs
 * [Installation](https://github.com/winedarksea/AutoTS#installation)
 * [Basic Use](https://github.com/winedarksea/AutoTS#basic-use)
 * [Tips for Speed and Large Data](https://github.com/winedarksea/AutoTS#tips-for-speed-and-large-data)
+* [Flowchart](https://github.com/winedarksea/AutoTS#autots-process)
 * Extended Tutorial [GitHub](https://github.com/winedarksea/AutoTS/blob/master/extended_tutorial.md) or [Docs](https://winedarksea.github.io/AutoTS/build/html/source/tutorial.html)
 * [Production Example](https://github.com/winedarksea/AutoTS/blob/master/production_example.py)
 
@@ -31,6 +34,8 @@ A combination of metrics and cross-validation options, the ability to apply subs
 pip install autots
 ```
 This includes dependencies for basic models, but [additonal packages](https://github.com/winedarksea/AutoTS/blob/master/extended_tutorial.md#installation-and-dependency-versioning) are required for some models and methods.
+
+Be advised there are several other projects that have chosen similar names, so make sure you are on the right AutoTS code, papers, and documentation.
 
 ## Basic Use
 
@@ -55,10 +60,10 @@ df = load_daily(long=long)
 
 model = AutoTS(
     forecast_length=21,
-    frequency='infer',
+    frequency="infer",
     prediction_interval=0.9,
     ensemble=None,
-    model_list="fast",  # "superfast", "default", "fast_parallel"
+    model_list="superfast",  # "fast", "default", "fast_parallel"
     transformer_list="fast",  # "superfast",
     drop_most_recent=1,
     max_generations=4,
@@ -102,6 +107,7 @@ Also take a look at the [production_example.py](https://github.com/winedarksea/A
 	* `superfast` (simple naive models) and `fast` (more complex but still faster models, optimized for many series)
 	* `fast_parallel` (a combination of `fast` and `parallel`) or `parallel`, given many CPU cores are available
 		* `n_jobs` usually gets pretty close with `='auto'` but adjust as necessary for the environment
+	* 'scalable' is the best list to avoid crashing when many series are present. There is also a transformer_list = 'scalable'
 	* see a dict of predefined lists (some defined for internal use) with `from autots.models.model_list import model_lists`
 * Use the `subset` parameter when there are many similar series, `subset=100` will often generalize well for tens of thousands of similar series.
 	* if using `subset`, passing `weights` for series will weight subset selection towards higher priority series.
@@ -117,6 +123,7 @@ Also take a look at the [production_example.py](https://github.com/winedarksea/A
 	* this can be done by adjusting `frequency` and `aggfunc` but is probably best done before passing data into AutoTS.
 * It will be faster if NaN's are already filled. If a search for optimal NaN fill method is not required, then fill any NaN with a satisfactory method before passing to class.
 * Set `runtime_weighting` in `metric_weighting` to a higher value. This will guide the search towards faster models, although it may come at the expense of accuracy. 
+* Memory shortage is the most common cause of random process/kernel crashes. Try testing a data subset and using a different model list if issues occur. Please also report crashes if found to be linked to a specific set of model parameters (not AutoTS parameters but the underlying forecasting model params). Also crashes vary significantly by setup such as underlying linpack/blas so seeing crash differences between environments can be expected. 
 
 ## How to Contribute:
 * Give feedback on where you find the documentation confusing
@@ -126,5 +133,38 @@ Also take a look at the [production_example.py](https://github.com/winedarksea/A
 	* Feel free to recommend different search grid parameters for your favorite models
 * And, of course, contributing to the codebase directly on GitHub.
 
+
+## AutoTS Process
+```mermaid
+flowchart TD
+    A[Initiate AutoTS Model] --> B[Import Template]
+    B --> C[Load Data]
+    C --> D[Split Data Into Initial Train/Test Holdout]
+    D --> E[Run Initial Template Models]
+    E --> F[Evaluate Accuracy Metrics on Results]
+    F --> G[Generate Score from Accuracy Metrics]
+    G --> H{Max Generations Reached or Timeout?}
+
+    H -->|No| I[Evaluate All Previous Templates]
+    I --> J[Genetic Algorithm Combines Best Results and New Random Parameters into New Template]
+    J --> K[Run New Template Models and Evaluate]
+    K --> G
+
+    H -->|Yes| L[Select Best Models by Score for Validation Template]
+    L --> M[Run Validation Template on Additional Holdouts]
+    M --> N[Evaluate and Score Validation Results]
+    N --> O{Create Ensembles?}
+    
+    O -->|Yes| P[Generate Ensembles from Validation Results]
+    P --> Q[Run Ensembles Through Validation]
+    Q --> N
+
+    O -->|No| R[Export Best Models Template]
+    R --> S[Select Single Best Model]
+    S --> T[Generate Future Time Forecast]
+    T --> U[Visualize Results]
+
+    R --> B[Import Best Models Template]
+```
 
 *Also known as Project CATS (Catlin's Automated Time Series) hence the logo.*

@@ -1,3 +1,5 @@
+# Extended Tutorial
+
 ## Table of Contents
 * [A Simple Example](https://winedarksea.github.io/AutoTS/build/html/source/tutorial.html#id1)
 * [Validation and Cross Validation](https://winedarksea.github.io/AutoTS/build/html/source/tutorial.html#id2)
@@ -13,8 +15,6 @@
 * [Simulation Forecasting](https://winedarksea.github.io/AutoTS/build/html/source/tutorial.html#id8)
 * [Event Risk Forecasting](https://winedarksea.github.io/AutoTS/build/html/source/tutorial.html#id9)
 * [Models](https://winedarksea.github.io/AutoTS/build/html/source/tutorial.html#id10)
-
-## Extended Tutorial
 
 ### A simple example
 ```python
@@ -69,12 +69,14 @@ Dropping series which are mostly missing, or using `prefill_na=0` (or other valu
 ### What to Worry About
 There are some basic things to beware of that can commonly lead to poor results:
 
-1. Bad data (sudden drops or missing values) in the *most recent* data is the single most common cause of bad forecasts here. As many models use the most recent data as a jumping off point, error in the most recent data points can have an oversized effect on forecasts. 
+1. Bad data (sudden drops or missing values) in the *most recent* data is the single most common cause of bad forecasts here. As many models use the most recent data as a jumping off point, error in the most recent data points can have an oversized effect on forecasts. Also remove all time series that are entirely NaN or entirely zero.
 2. Misrepresentative cross-validation samples. Models are chosen on performance in cross validation. If the validations don't accurately represent the series, a poor model may be chosen. Choose a good method and as many validations as possible. 
 3. Anomalies that won't be repeated. Manual anomaly removal can be more effective than any automatic methods. Along with this, beware of a changing pattern of NaN occurrences, as learned FillNA may not longer apply.
 4. Artifical historical events, a simple example being sales promotions. Use of regressors is the most common method for dealing with this and may be critical for modeling these types of events. 
 
 What you don't need to do before the automated forecasting is any typical preprocessing. It is best to leave it up to the model selection process to choose, as different models do better with different types of preprocessing. 
+
+One of the most common causes of failures for loading a template on a new dataset is models failing on series that are too short (or essentially all missing). Filter out series that are too new or have been discontinued, before proceeding.
 
 ### Validation and Cross Validation
 Cross validation helps assure that the optimal model is stable over the dynamics of a time series. 
@@ -287,6 +289,11 @@ This is similar to but faster than MDA (mean directional accuracy) as contour ev
 
 The contour and MADE metrics are useful as they encourages 'wavy' forecasts, ie, not flat line forecasts. Although flat line naive or linear forecasts can sometimes be very good models, they "don't look like they are trying hard enough" to some managers, and using them favors non-flat forecasts that (to many) look like a more serious model.
 
+If a metric is entirely NaN in the initial results, likely that holdout was entirely NaN in actuals.
+
+It may be worth viewing something like: `model.score_breakdown[model.score_breakdown.index == model.best_model_id].iloc[0]` to see if any one score is skewing selection. 
+Generally you would want the numbers here to follow the balance requested in the `metric_weighting`.
+
 ##### Plots
 ```python
 import matplotlib.pyplot as plt
@@ -302,7 +309,7 @@ prediction.plot(
 )
 plt.show()
 
-model.plot_per_series_smape(kind="pie")
+model.plot_per_series_mape(kind="pie")
 plt.show()
 
 model.plot_per_series_error()
@@ -352,7 +359,7 @@ Both `simple` and `distance` style models are constructed on the first evaluatio
 Both of these can also be recursive in depth, containing ensembles of ensembles. This recursive ensembling can happen when ensembles are imported from a starting template - they work just fine, but may get rather slow, having lots of models. 
 
 `horizontal` ensembles are the type of ensembles for which this package was originally created. 
-With this, each series gets its own model. This avoids the 'one size does not fit all' problem when many time series are in a datset. 
+With this, each series gets its own model. This avoids the 'one size does not fit all' problem when many time series are in a dataset. 
 In the interest of efficiency, univariate models are only run on the series they are needed for. 
 Models not in the `no_shared` list may make horizontal ensembling very slow at scale - as they have to be run for every series, even if they are only used for one. 
 `horizontal-max` chooses the best series for every model. `horizontal` and `horizontal-min` attempt to reduce the number of slow models chosen while still maintaining as much accuracy as possble. 
@@ -409,6 +416,9 @@ You can check if your system is using mkl, OpenBLAS, or none with `numpy.show_co
 	statsmodels
 		>= 0.13 ARDL and UECM
 	scipy.uniform_filter1d (for mosaic-window ensemble only)
+	scipy.stats (anomaly detection, Kalman)
+	scipy.signal (ScipyFilter)
+	scipy.spatial.cdist (Motifs)
 
 Of these, numpy and pandas are critical. 
 Limited functionality should exist without scikit-learn. 
@@ -431,6 +441,11 @@ Prophet, Greykite, and mxnet/GluonTS are packages which tend to be finicky about
 	tensorflow-probability
 	fredapi
 	greykite
+	matplotlib
+	pytorch-forecasting
+	neuralprophet
+	scipy
+	arch
 	
 Tensorflow, LightGBM, and XGBoost bring powerful models, but are also among the slowest. If speed is a concern, not installing them will speed up ~Regression style model runs. 
 
@@ -514,11 +529,13 @@ bench.results
 
 ### Mysterious crashes
 Usually mysterious crashes or hangs (those without clear error messages) occur when the CPU or Memory is overloaded. 
-`UnivariateRegression` is usually the most prone to these issues, removing it from the model_list may help. 
+`UnivariateRegression` is usually the most prone to these issues, removing it from the model_list may help (by default it is not included in most lists for this reason). 
 
 Try setting `n_jobs=1` or an otherwise low number, which should reduce the load. Also test the 'superfast' naive models, which are generally low resource consumption. 
 GPU-accelerated models (Tensorflow in Regressions and GluonTS) are also more prone to crashes, and may be a source of problems when used. 
 If problems persist, post to the GitHub Discussion or Issues. 
+
+Rebooting between heavy uses of multiprocessing can also help reduce the risk of crashing in future model runs.
 
 ### Series IDs really need to be unique (or column names need to be all unique in wide data)
 Pretty much as it says, if this isn't true, some odd things may happen that shouldn't.
@@ -666,7 +683,7 @@ df_full = load_daily(long=False)
 df = df_full[0: (df_full.shape[0] - forecast_length)]
 df_test = df[(df.shape[0] - forecast_length):]
 
-upper_limit = 0.95
+upper_limit = 0.95  # --> 95% quantile of historic data
 # if using manual array limits, historic limit must be defined separately (if used)
 lower_limit = np.ones((forecast_length, df.shape[1]))
 historic_lower_limit = np.ones(df.shape)
@@ -711,6 +728,8 @@ lower_limit = {
 Anomaly Detection
 
 Multiple methods are available, including use of `forecast_params` which can be used to analyze the historic deviations of an AutoTS forecasting model.
+
+Holiday detection may also pick up events or 'anti-holidays' ie days of low demand. It won't pick up holidays that don't usually have a significant impact.
 ```python
 from autots.evaluator.anomaly_detector import AnomalyDetector
 from autots.datasets import load_live_daily
@@ -740,6 +759,7 @@ params = AnomalyDetector.get_new_params()
 mod = AnomalyDetector(output='multivariate', **params)
 mod.detect(df)
 mod.plot()
+mod.scores # meaning of scores varies by method
 
 # holiday detection, random parameters
 holiday_params = HolidayDetector.get_new_params()
@@ -799,7 +819,7 @@ print(df_trans.tail())
 df_inv_return = trans.inverse_transform(df_trans, trans_method="original")  # forecast for future data
 ```
 
-### Note on Regression Models
+### Note on ~Regression Models
 The Regression models are WindowRegression, RollingRegression, UnivariateRegression, MultivariateRegression, and DatepartRegression. 
 They are all different ways of reshaping the time series into X and Y for traditional ML and Deep Learning approaches. 
 All draw from the same potential pool of models, mostly sklearn and tensorflow models. 
@@ -807,10 +827,10 @@ All draw from the same potential pool of models, mostly sklearn and tensorflow m
 * DatepartRegression is where X is simply the date features, and Y are the time series values for that date. 
 * WindowRegression takes an `n` preceeding data points as X to predict the future value or values of the series. 
 * RollingRegression takes all time series and summarized rolling values of those series in one massive dataframe as X. Works well for a small number of series but scales poorly. 
-* MultivariateRegression uses the same rolling features as above, but considers them one at a time, features for series `i` are used to predict next step for series `i`, with a model trained on all data from all series.
+* MultivariateRegression uses the same rolling features as above, but considers them one at a time, features for series `i` are used to predict next step for series `i`, with a model trained on all data from all series. This model is now often called by the community a "global forecasting ML model".
 * UnivariateRegression is the same as MultivariateRegression but trains an independent model on each series, thus not capable of learning from the patterns of other series. This performs well in horizontal ensembles as it can be parsed down to one series with the same performance on that series. 
 
-Currently `MultivariateRegression` has the option to utilize a stock GradientBoostingRegressor with quantile loss for probabilistic estimates, while others utilize point to probabilistic estimates.
+Currently `MultivariateRegression` has the (slower) option to utilize a stock GradientBoostingRegressor with quantile loss for probabilistic estimates, while others utilize point to probabilistic estimates.
 
 ## Models
 
@@ -839,18 +859,31 @@ Currently `MultivariateRegression` has the option to utilize a stock GradientBoo
 |  DatepartRegression     | sklearn      | lightgbm, tensorflow    |               |     sklearn     | some  |              |              | True          |
 |  MultivariateRegression | sklearn      | lightgbm, tensorflow    |    True       |     sklearn     | some  | True         |              | True          |
 |  UnivariateRegression   | sklearn      | lightgbm, tensorflow    |               |     sklearn     | some  |              |              | True          |
+|  PreprocessingRegression | sklearn     |                         |    False      |                 |       |              |              | True          |
 | Univariate/MultivariateMotif | scipy.distance.cdist |            |    True       |     joblib      |       | *            |              |               |
 |  SectionalMotif         | scipy.distance.cdist |  sklearn        |    True       |                 |       | True         |              | True          |
+|  MetricMotif, SeasonalityMotif |       |                         |    True       |                 |       |              |              |               |
+|  BallTreeMultivariateMotif | sklearn, scipy |                    |    True       |                 |       | True         |              |               |
 |  NVAR                   |              |                         |    True       |   blas/lapack   |       | True         |              |               |
 |  RRVAR, MAR, TMF        |              |                         |               |                 |       | True         |              |               |
 |  LATC                   |              |                         |               |                 |       | True         |              |               |
 |  NeuralProphet          | neuralprophet |                        |    nyi        |     pytorch     | yes   |              |              | True          |
 |  PytorchForecasting     | pytorch-forecasting |                  |    True       |     pytorch     | yes   | True         |              |               |
 |  ARCH                   | arch         |                         |    True       |     joblib      |       |              |              | True          |
-|  Greykite               | greykite     |                         |    True       |     joblib      |       |              | True         | nyi           |
+|  Cassandra              | scipy        |                         |    True       |                 |       | True         |              | True          |
+|  KalmanStateSpace       |              |                         |    True       |                 |       |              |              |               |
+|  FFT                    |              |                         |    True       |                 |       |              |              |               |
+|  DMD                    |              |                         |    True       |                 |       | True         |              |               |
+|  BasicLinearModel       |              |                         |    True       |                 |       |              |              | True          |
+|  TiDE                   | tensorflow   |                         |               |                 | yes   | True         |              |               |
+|  NeuralForecast         | NeuralForecast |                       |    True       |                 | yes   | True         |              | True          |
+|  TVVAR                  |              |                         |    True       |                 |       | True         |              | True          |
+| BallTreeRegressionMotif | sklearn      |                         |    True       |     joblib      |       | True         |              | True          |
 |  MotifSimulation        | sklearn.metrics.pairwise |             |    True       |     joblib      |       | True         | True         |               |
-|  TensorflowSTS          | tensorflow_probability |               |    True       |                 | yes   | True         | True         |               |
-|  TFPRegression          | (deprecated) |               |    True       |                 | yes   | True         | True         | True          |
+|  Greykite               | (deprecated) |                         |    True       |     joblib      |       |              | True         |               |
+|  TensorflowSTS          | (deprecated) |                         |    True       |                 | yes   | True         | True         |               |
+|  TFPRegression          | (deprecated) |                         |    True       |                 | yes   | True         | True         | True          |
 |  ComponentAnalysis      | (deprecated) |                         |               |                 |       | True         | True         | _             |
 
 *nyi = not yet implemented*
+* deprecated models are not actively maintained but updates may be requested in issues

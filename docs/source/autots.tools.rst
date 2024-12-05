@@ -28,10 +28,42 @@ autots.tools.cointegration module
    :undoc-members:
    :show-inheritance:
 
+autots.tools.constraint module
+------------------------------
+
+.. automodule:: autots.tools.constraint
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 autots.tools.cpu\_count module
 ------------------------------
 
 .. automodule:: autots.tools.cpu_count
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+autots.tools.fast\_kalman module
+--------------------------------
+
+.. automodule:: autots.tools.fast_kalman
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+autots.tools.fft module
+-----------------------
+
+.. automodule:: autots.tools.fft
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+autots.tools.fir\_filter module
+-------------------------------
+
+.. automodule:: autots.tools.fir_filter
    :members:
    :undoc-members:
    :show-inheritance:
@@ -132,6 +164,14 @@ autots.tools.transform module
    :undoc-members:
    :show-inheritance:
 
+autots.tools.wavelet module
+---------------------------
+
+.. automodule:: autots.tools.wavelet
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 autots.tools.window\_functions module
 -------------------------------------
 
@@ -139,7 +179,6 @@ autots.tools.window\_functions module
    :members:
    :undoc-members:
    :show-inheritance:
-
 
 Module contents
 ---------------

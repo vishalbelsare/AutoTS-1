@@ -1,27 +1,78 @@
 """Loading example datasets."""
+
 from os.path import dirname, join
 import time
 import datetime
 import io
+import json
 import numpy as np
 import pandas as pd
 
 
 def load_daily(long: bool = True):
-    """2020 Covid, Air Pollution, and Economic Data.
+    """Daily sample data.
 
-    Sources: Covid Tracking Project, EPA, and FRED
+    ```
+    # most of the wiki data was chosen to show holidays or holiday-like patterns
+    wiki = [
+        'United_States',
+        'Germany',
+        'List_of_highest-grossing_films',
+        'Jesus',
+        'Michael_Jackson',
+        'List_of_United_States_cities_by_population',
+        'Microsoft_Office',
+        'Google_Chrome',
+        'Periodic_table',
+        'Standard_deviation',
+        'Easter',
+        'Christmas',
+        'Chinese_New_Year',
+        'Thanksgiving',
+        'List_of_countries_that_have_gained_independence_from_the_United_Kingdom',
+        'History_of_the_hamburger',
+        'Elizabeth_II',
+        'William_Shakespeare',
+        'George_Washington',
+        'Cleopatra',
+        'all'
+    ]
+
+    df2 = load_live_daily(
+        observation_start="2017-01-01", weather_years=7, trends_list=None,
+        gov_domain_list=None, wikipedia_pages=wiki,
+        fred_series=['DGS10', 'T5YIE', 'SP500','DEXUSEU'], sleep_seconds=10,
+        fred_key = "93873d40f10c20fe6f6e75b1ad0aed4d",
+        weather_data_types = ["WSF2", "PRCP"],
+        weather_stations = ["USW00014771"],  # looking for intermittent
+        tickers=None, london_air_stations=None,
+        weather_event_types=None, earthquake_min_magnitude=None,
+    )
+    data_file_name = join("autots", "datasets", 'data', 'holidays.zip')
+    df2.to_csv(
+        data_file_name,
+        index=True,
+        compression={
+            'method': 'zip',
+            'archive_name': 'holidays.csv',
+            'compresslevel': 9  # Maximum compression level (0-9)
+        }
+    )
+    ```
+
+    Sources: Wikimedia Foundation
 
     Args:
         long (bool): if True, return data in long format. Otherwise return wide
     """
     module_path = dirname(__file__)
-    data_file_name = join(module_path, 'data', 'covid_daily.zip')
+    data_file_name = join(module_path, 'data', 'holidays.zip')
 
     df_wide = pd.read_csv(data_file_name, index_col=0, parse_dates=True)
     if not long:
         return df_wide
     else:
+        df_wide.index.name = 'datetime'
         df_long = df_wide.reset_index(drop=False).melt(
             id_vars=['datetime'], var_name='series_id', value_name='value'
         )
@@ -48,9 +99,7 @@ def load_fred_monthly():
     data_file_name = join(module_path, 'data', 'fred_monthly.zip')
 
     df_long = pd.read_csv(data_file_name, compression='zip')
-    df_long['datetime'] = pd.to_datetime(
-        df_long['datetime'], infer_datetime_format=True
-    )
+    df_long['datetime'] = pd.to_datetime(df_long['datetime'])
 
     return df_long
 
@@ -96,9 +145,7 @@ def load_fred_yearly():
     data_file_name = join(module_path, 'data', 'fred_yearly.zip')
 
     df_long = pd.read_csv(data_file_name)
-    df_long['datetime'] = pd.to_datetime(
-        df_long['datetime'], infer_datetime_format=True
-    )
+    df_long['datetime'] = pd.to_datetime(df_long['datetime'])
 
     return df_long
 
@@ -152,9 +199,7 @@ def load_eia_weekly():
     data_file_name = join(module_path, 'data', 'eia_weekly.zip')
 
     df_long = pd.read_csv(data_file_name, compression='zip')
-    df_long['datetime'] = pd.to_datetime(
-        df_long['datetime'], infer_datetime_format=True
-    )
+    df_long['datetime'] = pd.to_datetime(df_long['datetime'])
     return df_long
 
 
@@ -217,9 +262,9 @@ def load_live_daily(
     tickers: list = ["MSFT"],
     trends_list: list = ["forecasting", "cycling", "microsoft"],
     trends_geo: str = "US",
-    weather_data_types: list = ["AWND", "WSF2", "TAVG"],
-    weather_stations: list = ["USW00094846", "USW00014925"],
-    weather_years: int = 10,
+    weather_data_types: list = ["AWND", "WSF2", "TAVG", "PRCP"],
+    weather_stations: list = ["USW00094846", "USW00014925", "USW00014771"],
+    weather_years: int = 5,
     london_air_stations: list = ['CT3', 'SK8'],
     london_air_species: str = "PM25",
     london_air_days: int = 180,
@@ -231,8 +276,12 @@ def load_live_daily(
     wikipedia_pages: list = ['Microsoft_Office', "List_of_highest-grossing_films"],
     wiki_language: str = "en",
     weather_event_types=["%28Z%29+Winter+Weather", "%28Z%29+Winter+Storm"],
+    caiso_query: str = None,
+    eia_key: str = None,
+    eia_respondents: list = ["MISO", "PJM", "TVA", "US48"],
     timeout: float = 300.05,
     sleep_seconds: int = 2,
+    **kwargs,
 ):
     """Generates a dataframe of data up to the present day. Requires active internet connection.
     Try to be respectful of these free data sources by not calling too much too heavily.
@@ -241,7 +290,7 @@ def load_live_daily(
     Args:
         long (bool): whether to return in long format or wide
         observation_start (str): %Y-%m-%d earliest day to retrieve, passed to Fred.get_series and yfinance.history
-            note that apis with more restricts have other default lengths below which ignore this
+            note that apis with more restrictions have other default lengths below which ignore this
         observation_end (str):  %Y-%m-%d most recent day to retrieve
         fred_key (str): https://fred.stlouisfed.org/docs/api/api_key.html
         fred_series (list): list of FRED series IDs. This requires fredapi package
@@ -259,6 +308,7 @@ def load_live_daily(
         gov_domain_limit (int): max number of records. Smaller will be faster. Max is currently 10000.
         wikipedia_pages (list): list of Wikipedia pages, html encoded if needed (underscore for space)
         weather_event_types (list): list of html encoded severe weather event types https://www1.ncdc.noaa.gov/pub/data/swdi/stormevents/csvfiles/Storm-Data-Export-Format.pdf
+        caiso_query (str): ENE_SLRS or None, can try others but probably won't work due to other hardcoded params
         timeout (float): used by some queries
         sleep_seconds (int): increasing this may reduce probability of server download failures
     """
@@ -272,7 +322,7 @@ def load_live_daily(
     if observation_start is None:
         # should take from observation_end but that's expected as a string
         observation_start = datetime.datetime.utcnow() - datetime.timedelta(
-            days=365 * 5
+            days=365 * 6
         )
         observation_start = observation_start.strftime("%Y-%m-%d")
     try:
@@ -340,7 +390,7 @@ def load_live_daily(
                 wdf = pd.read_csv(
                     io.StringIO(s.get(wbase + wargs, timeout=timeout).text)
                 )
-                wdf['DATE'] = pd.to_datetime(wdf['DATE'], infer_datetime_format=True)
+                wdf['DATE'] = pd.to_datetime(wdf['DATE'])
                 wdf = wdf.set_index('DATE').drop(columns=['STATION'])
                 wdf.rename(columns=lambda x: wstation + "_" + x, inplace=True)
                 dataset_lists.append(wdf)
@@ -380,7 +430,7 @@ def load_live_daily(
             ebase = "https://earthquake.usgs.gov/fdsnws/event/1/query?"
             eargs = f"format=csv&starttime={start_date}&endtime={str_end_time}&minmagnitude={earthquake_min_magnitude}"
             eq = pd.read_csv(ebase + eargs)
-            eq["time"] = pd.to_datetime(eq["time"], infer_datetime_format=True)
+            eq["time"] = pd.to_datetime(eq["time"])
             eq["time"] = eq["time"].dt.tz_localize(None)
             eq.set_index("time", inplace=True)
             global_earthquakes = eq.resample("1D").agg(
@@ -422,9 +472,7 @@ def load_live_daily(
             print(f"analytics.gov data failed with {repr(e)}")
 
     if wikipedia_pages is not None:
-        str_start = pd.to_datetime(
-            observation_start, infer_datetime_format=True
-        ).strftime("%Y%m%d00")
+        str_start = pd.to_datetime(observation_start).strftime("%Y%m%d00")
         str_end = current_date.strftime("%Y%m%d00")
         headers = {
             'User-Agent': 'AutoTS load_live_daily',
@@ -460,12 +508,8 @@ def load_live_daily(
                     df = pd.read_csv(csv_in, low_memory=False, on_bad_lines='skip')
                 except Exception:
                     df = pd.read_csv(csv_in, low_memory=False, error_bad_lines=False)
-                df['BEGIN_DATE'] = pd.to_datetime(
-                    df['BEGIN_DATE'], infer_datetime_format=True
-                )
-                df['END_DATE'] = pd.to_datetime(
-                    df['END_DATE'], infer_datetime_format=True
-                )
+                df['BEGIN_DATE'] = pd.to_datetime(df['BEGIN_DATE'])
+                df['END_DATE'] = pd.to_datetime(df['END_DATE'])
                 df['day'] = df.apply(
                     lambda row: pd.date_range(
                         row["BEGIN_DATE"], row['END_DATE'], freq='D'
@@ -496,6 +540,137 @@ def load_live_daily(
         except Exception as e:
             print(f"pytrends data failed: {repr(e)}")
 
+    # this was kinda broken last I checked
+    if caiso_query is not None:
+        try:
+            n_chunks = (364 * weather_years) / 30
+            if n_chunks % 30 != 0:
+                n_chunks = int(n_chunks) + 1
+            energy_df = []
+            for x in range(n_chunks):
+                try:
+                    end_nospace = (
+                        current_date - datetime.timedelta(days=30 * x)
+                    ).strftime("%Y%m%d")
+                    start_nospace = (
+                        current_date - datetime.timedelta(days=30 * (x + 1) + 1)
+                    ).strftime("%Y%m%d")
+                    caiso_url = f"http://oasis.caiso.com/oasisapi/SingleZip?resultformat=6&queryname={caiso_query}&version=1&market_run_id=RTM&tac_zone_name=ALL&schedule=Generation&startdatetime={start_nospace}T00:00-0000&enddatetime={end_nospace}T23:00-0000"
+                    data = pd.read_csv(caiso_url, compression='zip')
+                    data['OPR_DT'] = pd.to_datetime(data['OPR_DT'])
+                    data = data[data['OPR_HR'] < 25]
+                    energy_df.append(
+                        data.groupby(['OPR_DT', 'OPR_HR'])['MW']
+                        .mean()
+                        .reset_index()
+                        .pivot_table(
+                            values='MW', index='OPR_DT', columns='OPR_HR', aggfunc='sum'
+                        )
+                        .rename(columns=lambda x: "CAISO_GENERATION_HR_" + str(x))
+                        .sort_index()
+                        .bfill()
+                    )
+                    time.sleep(sleep_seconds + 8)
+                except Exception as e:
+                    print(f"caiso download failed with error: {repr(e)}")
+                    time.sleep(sleep_seconds)
+            energy_df = pd.concat(energy_df).sort_index()
+            energy_df = energy_df[~energy_df.index.duplicated(keep='last')]
+            dataset_lists.append(energy_df)
+        except Exception as e:
+            print(f"caiso download failed with error: {repr(e)}")
+
+    if eia_key is not None and eia_respondents is not None:
+        api_url = 'https://api.eia.gov/v2/electricity/rto/daily-region-data/data/'  # ?api_key={eia-key}
+        for respond in eia_respondents:
+            try:
+                params = {
+                    "frequency": "daily",
+                    "data": ["value"],
+                    "facets": {
+                        "type": ["D"],
+                        "respondent": [respond],
+                        "timezone": ["Eastern"],
+                    },
+                    "start": None,  # "start": "2018-06-30",
+                    "end": None,  # "end": "2023-11-01",
+                    "sort": [{"column": "period", "direction": "desc"}],
+                    "offset": 0,
+                    "length": 5000,
+                }
+
+                res = s.get(
+                    api_url,
+                    params={
+                        "api_key": eia_key,
+                    },
+                    headers={"X-Params": json.dumps(params)},
+                )
+                eia_df = pd.json_normalize(res.json()['response']['data'])
+                eia_df['datetime'] = pd.to_datetime(eia_df['period'])
+                eia_df['value'] = eia_df['value'].astype('float')
+                eia_df['ID'] = (
+                    eia_df['respondent']
+                    + "_"
+                    + eia_df['type']
+                    + "_"
+                    + eia_df['timezone']
+                )
+                temp = eia_df.pivot(columns='ID', index='datetime', values='value')
+                dataset_lists.append(temp)
+                time.sleep(sleep_seconds)
+            except Exception as e:
+                print(f"eia download failed with error {repr(e)}")
+            try:
+                api_url_mix = (
+                    "https://api.eia.gov/v2/electricity/rto/daily-fuel-type-data/data/"
+                )
+                params = {
+                    "frequency": "daily",
+                    "data": ["value"],
+                    "facets": {
+                        "respondent": [respond],
+                        "timezone": ["Eastern"],
+                        "fueltype": [
+                            "COL",
+                            "NG",
+                            "NUC",
+                            "SUN",
+                            "WAT",
+                            "WND",
+                        ],
+                    },
+                    "start": None,
+                    "end": None,
+                    "sort": [{"column": "period", "direction": "desc"}],
+                    "offset": 0,
+                    "length": 5000,
+                }
+                res = s.get(
+                    api_url_mix,
+                    params={
+                        "api_key": eia_key,
+                    },
+                    headers={"X-Params": json.dumps(params)},
+                )
+                eia_df = pd.json_normalize(res.json()['response']['data'])
+                eia_df['datetime'] = pd.to_datetime(eia_df['period'])
+                eia_df['value'] = eia_df['value'].astype('float')
+                eia_df['type-name'] = eia_df['type-name'].str.replace(" ", "_")
+                eia_df['ID'] = (
+                    eia_df['respondent']
+                    + "_"
+                    + eia_df['type-name']
+                    + "_"
+                    + eia_df['timezone']
+                )
+                temp = eia_df.pivot(columns='ID', index='datetime', values='value')
+                dataset_lists.append(temp)
+                time.sleep(1)
+            except Exception as e:
+                print(f"eia download failed with error {repr(e)}")
+
+    ### End of data download
     if len(dataset_lists) < 1:
         raise ValueError("No data successfully downloaded!")
     elif len(dataset_lists) == 1:
@@ -509,6 +684,7 @@ def load_live_daily(
         )
     print(f"{df.shape[1]} series downloaded.")
     s.close()
+    df.index.name = "datetime"
 
     if not long:
         return df
@@ -631,14 +807,42 @@ def load_artificial(long=False, date_start=None, date_end=None):
         date_end = date_end.date()
     if date_start is None:
         if isinstance(date_end, datetime.date):
-            date_start = date_end - datetime.timedelta(days=720)
+            date_start = date_end - datetime.timedelta(days=740)
         else:
-            date_start = datetime.datetime.now().date() - datetime.timedelta(days=720)
+            date_start = datetime.datetime.now().date() - datetime.timedelta(days=740)
     if isinstance(date_start, datetime.datetime):
         date_start = date_start.date()
     dates = pd.date_range(date_start, date_end)
     size = dates.size
+    new_size = int(size / 10)
     rng = np.random.default_rng()
+    holiday = pd.Series(
+        np.arange(size) * 0.025
+        + rng.normal(0, 0.2, size)
+        + (np.sin((np.pi / 7) * np.arange(size)) * 0.5),
+        index=dates,
+        name='holiday',
+    )
+    # January 1st
+    holiday[holiday.index.month == 1 & (holiday.index.day == 1)] += 10
+    # December 25th
+    holiday[(holiday.index.month == 12) & (holiday.index.day == 25)] += -4
+    # Second Tuesday of April
+    # Find all Tuesdays in April
+    second_tuesday_of_april = (
+        (holiday.index.month == 4)
+        & (holiday.index.weekday == 1)
+        & (holiday.index.day >= 8)
+        & (holiday.index.day <= 14)
+    )
+    holiday[second_tuesday_of_april] += 10
+    # Last Monday of August
+    last_monday_of_august = (
+        (holiday.index.month == 8)
+        & (holiday.index.weekday == 0)
+        & ((holiday.index + pd.Timedelta(7, unit='D')).month == 9)
+    )
+    holiday[last_monday_of_august] += 12
 
     df_wide = pd.DataFrame(
         {
@@ -672,6 +876,13 @@ def load_artificial(long=False, date_start=None, date_end=None):
                 / 2,
             ),
             "linear": np.arange(size) * 0.025,
+            "flat": 1,
+            "new_product": np.concatenate(
+                [
+                    np.zeros(int(size - new_size)),
+                    np.random.choice(a=[-0.8, 0, 0.8], size=new_size).cumsum(),
+                ]
+            ),
             "sine_wave": np.sin(np.arange(size)),
             "sine_seasonality_monthweek": (
                 (np.sin((np.pi / 7) * np.arange(size)) * 0.25 + 0.25)
@@ -764,6 +975,7 @@ def load_artificial(long=False, date_start=None, date_end=None):
         },
         index=dates,
     )
+    df_wide = df_wide.merge(holiday, left_index=True, right_index=True)
 
     if not long:
         return df_wide

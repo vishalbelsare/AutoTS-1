@@ -1,6 +1,7 @@
 """
 Point to Probabilistic
 """
+
 import pandas as pd
 import numpy as np
 from autots.tools.impute import fake_date_fill
@@ -50,8 +51,8 @@ def historic_quantile(df_train, prediction_interval: float = 0.9, nan_flag=None)
 def inferred_normal(train, forecast, n: int = 5, prediction_interval: float = 0.9):
     """A corruption of Bayes theorem.
     It will be sensitive to the transformations of the data."""
-    prior_mu = train.mean().values
-    prior_sigma = train.std().values
+    prior_mu = train.mean().to_numpy()
+    prior_sigma = train.std().replace(0, 1).to_numpy()
     idx = forecast.index
     columns = forecast.columns
     from scipy.stats import norm
@@ -127,9 +128,7 @@ def Variable_Point_to_Probability(train, forecast, alpha=0.3, beta=1):
     # median_change = (1  + median_change)
     # median_change[median_change <= 0 ] = 0.01  # HANDLE GOING BELOW ZERO
 
-    diffs = abs(
-        forecast - (forecast + forecast * median_change).fillna(method='ffill').shift(1)
-    )
+    diffs = abs(forecast - (forecast + forecast * median_change).ffill().shift(1))
 
     forecast_percent_changes = forecast.replace(0, np.nan).pct_change()
 
@@ -153,7 +152,7 @@ def Variable_Point_to_Probability(train, forecast, alpha=0.3, beta=1):
     En = quantile_differences * diffs
     Enneg1 = En.cumsum().shift(1).fillna(0)
     ErrorRange = beta * (En + alpha * Enneg1)
-    ErrorRange = ErrorRange.fillna(method='bfill').fillna(method='ffill')
+    ErrorRange = ErrorRange.bfill().ffill()
 
     return ErrorRange
 

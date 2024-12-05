@@ -11,30 +11,22 @@
 * Series will largely be consistent in period, or at least up-sampled to regular intervals
 * The most recent data will generally be the most important
 * Forecasts are desired for the future immediately following the most recent data.
+* trimmed_mean to AverageValueNaive
 
-# Latest :space_invader: :space_invader: :space_invader:
-* added AnomalyDetector
-* added HolidayDetector
-* added observation_end and Wikipedia data to load_live_daily
-* added binarized versions of datepart method (should have done ages ago!)
-* addded RRVAR, MAR, TMF, LATC models
-* added AlignLastValue transformer
-* added plot_horizontal_model_count and fixed an error in horizontal generation plot
-* adjusted TotalRuntime to higher precision, and no longer + 1
-* added subsidiary transformer for cleaning in Detrend and Datepart detrend Transformers
-* sped up SinTrend transformer
-* new AnomalyRemoval transformer
-* added HolidayTransformer
-* added auto holidays to Prophet
-* added get_new_params method to AutoTS class
-* more holidays options to create_regressor
+# 0.6.17 🇺🇦 🇺🇦 🇺🇦
+* minor adjustments and bug fixes for scalability
+* added BallTreeRegressionMotif
 
+### Unstable Upstream Pacakges (those that are frequently broken by maintainers)
+* Pytorch-Forecasting
+* Neural Prophet
+* GluonTS
 
 ### New Model Checklist:
 	* Add to ModelMonster in auto_model.py
 	* add to appropriate model_lists: all, recombination_approved if so, no_shared if so
 	* add to model table in extended_tutorial.md (most columns here have an equivalent model_list)
-	* if model has regressors, make sure it meets Simulation Forecasting needs (method="regressor", fails on no regressor if "User")
+	* if model has regressors, make sure it meets Simulation Forecasting needs (method=="regressor", fails on no regressor if "User")
 
 ## New Transformer Checklist:
 	* Make sure that if it modifies the size (more/fewer columns or rows) it returns pd.DataFrame with proper index/columns
@@ -43,10 +35,12 @@
 	* add to shared_trans if so
 	* oddities_list for those with forecast/original transform difference
 	* add to docstring of GeneralTransformer
+	* add to dictionary by type: filter, scaler, transformer
+	* add to test_transform call
 
 ## New Metric Checklist:
 	* Create function in metrics.py
-	* Add to mode base .evaluate()  (benchmark to make sure it is still fast)
+	* Add to mode base full_metric_evaluation  (benchmark to make sure it is still fast)
 	* Add to concat in TemplateWizard (if per_series metrics will be used)
 	* Add to concat in TemplateEvalObject (if per_series metrics will be used)
 	* Add to generate_score

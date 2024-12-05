@@ -1,4 +1,6 @@
 """Reshape data."""
+
+import re
 import numpy as np
 import pandas as pd
 
@@ -18,14 +20,49 @@ def infer_frequency(df_wide, warn=True, **kwargs):
         raise ValueError(
             "infer_frequency failed due to input not being pandas DF or DT index"
         )
-    frequency = pd.infer_freq(DTindex, warn=True)
+    # 'warn' arg removed in pandas 2.0.0
+    frequency = pd.infer_freq(DTindex)
     if frequency is None:
         # hack to get around data which has a few oddities
-        frequency = pd.infer_freq(DTindex[-10:], warn=True)
+        frequency = pd.infer_freq(DTindex[-10:])
     if frequency is None:
         # hack to get around data which has a few oddities
-        frequency = pd.infer_freq(DTindex[:10], warn=True)
+        frequency = pd.infer_freq(DTindex[:10])
     return frequency
+
+
+def split_digits_and_non_digits(s):
+    # Find all digit and non-digit sequences
+    all_parts = re.findall(r'\d+|\D+', s)
+
+    # Separate digit and non-digit parts
+    digits = ''.join(part for part in all_parts if part.isdigit())
+    nondigits = ''.join(part for part in all_parts if not part.isdigit())
+
+    return digits, nondigits
+
+
+def freq_to_timedelta(freq):
+    """Working around pandas limitations."""
+    freq = str(freq).split("-")[0]
+    digits, nondigits = split_digits_and_non_digits(freq)
+    # 'month start' is being recognized as miliseconds here
+    if freq == "MS":
+        return pd.to_timedelta(28, units='D')
+    if not digits:
+        freq = "1" + freq
+    try:
+        new_freq = pd.to_timedelta(freq)
+    except Exception:
+        if "M" in freq:
+            new_freq = pd.to_timedelta(28, unit='D')
+        elif 'y' in freq.lower():
+            new_freq = pd.to_timedelta(364, unit='D')
+        else:
+            raise ValueError(
+                f"freq {freq} not recognized for to_timedelta. Please report this issue to AutoTS if found"
+            )
+    return new_freq
 
 
 def df_cleanup(
@@ -53,25 +90,33 @@ def df_cleanup(
         pd.DataFrame: original dataframe, now possibly shorter.
 
     """
+    if drop_most_recent is None:
+        drop_most_recent = 0
+    elif not isinstance(drop_most_recent, (float, int)):
+        raise ValueError(
+            f"drop_most_recent must be an integer or None, not {drop_most_recent}"
+        )
     # check to make sure column names are unique
     if verbose > 0:
         dupes = df_wide.columns.duplicated()
         if sum(dupes) > 0:
-            print("Warning, series ids are not unique: {df_wide.columns[dupes]}")
+            print(f"Warning, series ids are not unique: {df_wide.columns[dupes]}")
 
     # infer frequency
     if frequency == 'infer':
-        frequency = infer_frequency(df_wide)
-        if verbose > 0:
-            print("Inferred frequency is: {}".format(str(frequency)))
-        if (frequency is None) and (verbose >= 0):
-            print("Frequency is 'None'! Input frequency not recognized.")
+        inferred_freq = infer_frequency(df_wide)
+        frequency = inferred_freq
 
-    # fill missing dates in index with NaN, resample to freq as necessary
-    try:
-        df_wide = df_wide.resample(frequency).apply(aggfunc)
-    except Exception:
-        df_wide = df_wide.asfreq(frequency, fill_value=np.nan)
+    # trying to avoid resampling if necessary because it can cause unexpected data changes
+    # test if dates are missing from index
+    expected_index = pd.date_range(df_wide.index[0], df_wide.index[-1], freq=frequency)
+    # or at least if lengths are the same, which should be a 'good enough' test for likely issues
+    if len(df_wide.index) != len(expected_index):
+        # fill missing dates in index with NaN, resample to freq as necessary
+        try:
+            df_wide = df_wide.resample(frequency).apply(aggfunc)
+        except Exception:
+            df_wide = df_wide.asfreq(frequency, fill_value=np.nan)
 
     # drop older data, because too much of a good thing...
     if str(drop_data_older_than_periods).isdigit():
@@ -109,7 +154,7 @@ def df_cleanup(
     if drop_most_recent > 0:
         df_wide.drop(df_wide.tail(drop_most_recent).index, inplace=True)
 
-    return pd.DataFrame(df_wide)
+    return df_wide
 
 
 def long_to_wide(
@@ -135,9 +180,7 @@ def long_to_wide(
 
     # Attempt to convert to datetime format if not already
     try:
-        df_long[date_col] = pd.to_datetime(
-            df_long[date_col], infer_datetime_format=True
-        )
+        df_long[date_col] = pd.to_datetime(df_long[date_col])
     except Exception:
         raise ValueError(
             "Could not convert date to datetime format. Incorrect column name or preformat with pandas to_datetime"
@@ -174,6 +217,7 @@ class NumericTransformer(object):
             "ffill" - uses forward and backward filling to supply na values
             "indicator" or anything else currently results in all missing replaced with str "missing_value"
         handle_unknown (str): passed through to scikit-learn OrdinalEncoder
+        downcast (str): passed to pd.to_numeric, use None or 'float'
         verbose (int): greater than 0 to print some messages
     """
 
@@ -182,6 +226,7 @@ class NumericTransformer(object):
         na_strings: list = ['', ' '],  # 'NULL', 'NA', 'NaN', 'na', 'nan'
         categorical_fillna: str = "ffill",
         handle_unknown: str = 'use_encoded_value',
+        downcast: str = None,
         verbose: int = 0,
     ):
         self.na_strings = na_strings
@@ -190,6 +235,7 @@ class NumericTransformer(object):
         self.handle_unknown = handle_unknown
         self.categorical_flag = False
         self.needs_transformation = True
+        self.downcast = downcast
 
     def _fit(self, df):
         """Fit categorical to numeric."""
@@ -207,7 +253,7 @@ class NumericTransformer(object):
             df.replace(self.na_strings, np.nan, inplace=True)  # pd.NA in future
 
             # convert series to numeric which can be readily converted.
-            df = df.apply(pd.to_numeric, errors='ignore')
+            df = df.apply(pd.to_numeric, errors='ignore', downcast=self.downcast)
 
             # record which columns are which dtypes
             self.column_order = df.columns
@@ -225,7 +271,7 @@ class NumericTransformer(object):
 
                 df_enc = df[self.categorical_features]
                 if self.categorical_fillna == "ffill":
-                    df_enc = df_enc.fillna(method='ffill').fillna(method='bfill')
+                    df_enc = df_enc.ffill().bfill()
                 df_enc = df_enc.fillna('missing_value')
                 self.cat_transformer = OrdinalEncoder(
                     handle_unknown=self.handle_unknown, unknown_value=np.nan
@@ -276,8 +322,8 @@ class NumericTransformer(object):
             df.replace(self.na_strings, np.nan, inplace=True)
             df = df.apply(pd.to_numeric, errors='ignore')
             if self.categorical_flag:
-                df_enc = (df[self.categorical_features]).fillna(method='ffill')
-                df_enc = df_enc.fillna(method='bfill').fillna('missing_value')
+                df_enc = (df[self.categorical_features]).ffill()
+                df_enc = df_enc.bfill().fillna('missing_value')
                 df_enc = self.cat_transformer.transform(df_enc) + 1
                 df = pd.concat(
                     [
@@ -377,7 +423,13 @@ def simple_train_test_split(
         (df.shape[0]) - forecast_length
     ):
         raise ValueError(
-            "forecast_length is too large for training data, alter min_allowed_train_percent to override"
+            """forecast_length is too large for training data.
+What this means is you don't have enough history to support cross validation with your forecast_length.
+Various solutions include bringing in more data, alter min_allowed_train_percent to something smaller,
+and also setting a shorter forecast_length to class init for cross validation which you can then override with a longer value in .predict()
+This error is also often caused by errors in inputing of or preshaping the data.
+Check model.df_wide_numeric to make sure data was imported correctly.
+            """
         )
 
     train = df.head((df.shape[0]) - forecast_length)

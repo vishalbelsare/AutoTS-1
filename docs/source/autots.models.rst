@@ -28,6 +28,14 @@ autots.models.basics module
    :undoc-members:
    :show-inheritance:
 
+autots.models.cassandra module
+------------------------------
+
+.. automodule:: autots.models.cassandra
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 autots.models.dnn module
 ------------------------
 
@@ -68,10 +76,26 @@ autots.models.matrix\_var module
    :undoc-members:
    :show-inheritance:
 
+autots.models.mlensemble module
+-------------------------------
+
+.. automodule:: autots.models.mlensemble
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
 autots.models.model\_list module
 --------------------------------
 
 .. automodule:: autots.models.model_list
+   :members:
+   :undoc-members:
+   :show-inheritance:
+
+autots.models.neural\_forecast module
+-------------------------------------
+
+.. automodule:: autots.models.neural_forecast
    :members:
    :undoc-members:
    :show-inheritance:
@@ -116,6 +140,13 @@ autots.models.tfp module
    :undoc-members:
    :show-inheritance:
 
+autots.models.tide module
+-------------------------
+
+.. automodule:: autots.models.tide
+   :members:
+   :undoc-members:
+   :show-inheritance:
 
 Module contents
 ---------------

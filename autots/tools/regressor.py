@@ -6,6 +6,7 @@ from autots.tools.seasonal import date_part
 from autots.tools.holiday import holiday_flag
 from autots.tools.cointegration import coint_johansen
 from autots.evaluator.anomaly_detector import HolidayDetector
+from autots.tools.transform import GeneralTransformer
 
 
 def create_regressor(
@@ -44,12 +45,15 @@ def create_regressor(
             "method_params": {"distribution": "gamma", "alpha": 0.05},
         },
     },
-    holiday_regr_style="flag",
+    holiday_regr_style: str = "flag",
+    preprocessing_params: dict = None,
 ):
     """Create a regressor from information available in the existing dataset.
     Components: are lagged data, datepart information, and holiday.
 
-    All of this info and more is already created by the ~Regression models, but this may help some other models (GLM, WindowRegression)
+    This function has been confusing people. This is NOT necessary for machine learning models, in AutoTS they internally create more elaborate feature sets separately.
+    This instead may help some other models (GLM, ARIMA) which accept regressors but won't build a regressor feature set internally.
+    And this allows post-hoc customization as needed before input to AutoTS.
 
     It is recommended that the .head(forecast_length) of both regressor_train and the df for training are dropped.
     `df = df.iloc[forecast_length:]`
@@ -75,6 +79,7 @@ def create_regressor(
         encode_holiday_type (bool): if True, returns column per holiday, ONLY for holidays package country holidays (not Detector)
         holiday_detector_params (dict): passed to HolidayDetector, or None
         holiday_regr_style (str): passed to detector's dates_to_holidays 'flag', 'series_flag', 'impact'
+        preprocessing_params (dict): GeneralTransformer params to be applied before regressor creation
 
     Returns:
         regressor_train, regressor_forecast
@@ -99,8 +104,18 @@ def create_regressor(
         except Exception:
             df = df.asfreq(frequency, fill_value=None)
     # handle categorical
-    df = df.apply(pd.to_numeric, errors='ignore')
+    # df = df.apply(pd.to_numeric, errors='ignore') # another pointless pandas deprecation
+    for col in df.columns:
+        try:
+            df.loc[:, col] = pd.to_numeric(df[col])
+        except ValueError:
+            pass
     df = df.select_dtypes(include=np.number)
+    # macro_micro
+    if preprocessing_params is not None:
+        trans = GeneralTransformer(**preprocessing_params)
+        df = trans.fit_transform(df)
+
     # lagged data
     regr_train, regr_fcst = create_lagged_regressor(
         df,
@@ -129,10 +144,6 @@ def create_regressor(
             holiday_countries = {x: None for x in holiday_countries}
 
         for holiday_country, holidays_subdiv in holiday_countries.items():
-            if holiday_country == "RU":
-                holiday_country = "UA"
-            elif holiday_country == 'CN':
-                holiday_country = 'TW'
             # create holiday flag for historic regressor
             regr_train = pd.concat(
                 [
@@ -199,11 +210,15 @@ def create_regressor(
                 axis=1,
             )
         except Exception as e:
-            print(repr(e))
+            print("HolidayDetector failed with error: " + repr(e)[:180])
 
     # columns all as strings
     regr_train.columns = [str(xc) for xc in regr_train.columns]
     regr_fcst.columns = [str(xc) for xc in regr_fcst.columns]
+    # drop duplicate columns (which come from holidays)
+    regr_train = regr_train.loc[:, ~regr_train.columns.duplicated()]
+    regr_fcst = regr_fcst.loc[:, ~regr_fcst.columns.duplicated()]
+    regr_fcst = regr_fcst.reindex(columns=regr_train.columns, fill_value=0)
     return regr_train, regr_fcst
 
 
@@ -315,10 +330,14 @@ def create_lagged_regressor(
         )
 
     regressor_forecast = df_inner.tail(forecast_length)
-    # also dates.shift(forecast_length)[-forecast_length:]
-    regressor_forecast.index = pd.date_range(
-        dates[-1], periods=(forecast_length + 1), freq=frequency
-    )[1:]
+    try:
+        regressor_forecast.index = pd.date_range(
+            dates[-1], periods=(forecast_length + 1), freq=frequency
+        )[1:]
+    except Exception:
+        raise ValueError(
+            "create_regressor doesn't work on data where forecast_length > historical data length"
+        )
     regressor_train = df_inner.shift(forecast_length)
     if backfill == "ets":
         model_flag = True
@@ -329,7 +348,7 @@ def create_lagged_regressor(
         model_name = 'DatepartRegression'
         model_param_dict = '{"regression_model": {"model": "RandomForest", "model_params": {}}, "datepart_method": "recurring", "regression_type": null}'
     else:
-        regressor_train = regressor_train.fillna(method="bfill").fillna(method="ffill")
+        regressor_train = regressor_train.bfill().ffill()
 
     if model_flag:
         from autots import model_forecast

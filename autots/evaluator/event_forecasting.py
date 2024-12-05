@@ -7,6 +7,41 @@ import numpy as np
 import pandas as pd
 from autots.evaluator.auto_model import model_forecast, back_forecast
 from autots.evaluator.auto_ts import AutoTS
+from autots.models.model_list import all_result_path, diff_window_motif_list
+
+
+def extract_result_windows(forecasts, model_name=None):
+    """standardize result windows from different models."""
+    result_windows = forecasts.model.result_windows
+    if model_name is None:
+        model_name = forecasts.model_name
+    if model_name in diff_window_motif_list:
+        result_windows = np.moveaxis(np.array(list(result_windows.values())), 0, -1)
+    if result_windows.ndim == 4:
+        result_windows = result_windows[0]
+    transformed_array = []
+    # bring these back to the original feature space, as they aren't already
+    for samp in result_windows:
+        transformed_array.append(
+            forecasts.transformer.inverse_transform(
+                pd.DataFrame(
+                    samp,
+                    index=forecasts.forecast.index,
+                    columns=forecasts.forecast.columns,
+                )
+            )
+        )
+    return np.array(transformed_array)
+
+
+def extract_window_index(forecasts):
+    model_name = forecasts.model_name
+    if model_name == "SectionalMotif":
+        return forecasts.model.windows
+    if model_name == "BallTreeMultivariateMotif":
+        return forecasts.model.windows
+    else:
+        raise ValueError("window indexes not supported by this model yet")
 
 
 def set_limit_forecast(
@@ -208,7 +243,14 @@ class EventRiskForecast(object):
         forecast_length=None,
         prediction_interval=None,
         models_mode="event_risk",
-        model_list=["UnivariateMotif", "MultivariateMotif", "SectionalMotif", "ARCH"],
+        model_list=[
+            "UnivariateMotif",
+            "MultivariateMotif",
+            "SectionalMotif",
+            "ARCH",
+            'MetricMotif',
+            'SeasonalityMotif',
+        ],
         ensemble=None,
         autots_kwargs=None,
         future_regressor_train=None,
@@ -241,9 +283,9 @@ class EventRiskForecast(object):
         if isinstance(prediction_interval, list):
             prediction_interval = prediction_interval[0]
         model = AutoTS(
-            forecast_length=self.forecast_length
-            if forecast_length is None
-            else forecast_length,
+            forecast_length=(
+                self.forecast_length if forecast_length is None else forecast_length
+            ),
             prediction_interval=prediction_interval,
             models_mode=models_mode,
             model_list=model_list,
@@ -311,23 +353,7 @@ class EventRiskForecast(object):
             else future_regressor_forecast
         )
 
-        # this should be implementable with some models in gluonts and pytorch-forecasting
-        all_motif_list = [
-            "UnivariateMotif",
-            "MultivariateMotif",
-            "SectionalMotif",
-            "Motif",
-            "ARCH",  # simulations not motifs but similar
-            "PytorchForecasting",
-        ]
-        # these are those that require a parameter, and return a dict
-        diff_window_motif_list = [
-            "UnivariateMotif",
-            "MultivariateMotif",
-            "Motif",
-            "ARCH",
-        ]
-        if model_name in all_motif_list:
+        if model_name in all_result_path:
             if isinstance(prediction_interval, list):
                 prediction_interval = prediction_interval[0]
             if model_name in diff_window_motif_list:
@@ -348,26 +374,7 @@ class EventRiskForecast(object):
                 return_model=True,
                 **model_forecast_kwargs,
             )
-            result_windows = forecasts.model.result_windows
-            if model_name in diff_window_motif_list:
-                result_windows = np.moveaxis(
-                    np.array(list(result_windows.values())), 0, -1
-                )
-            if result_windows.ndim == 4:
-                result_windows = result_windows[0]
-            transformed_array = []
-            # bring these back to the original feature space, as they aren't already
-            for samp in result_windows:
-                transformed_array.append(
-                    forecasts.transformer.inverse_transform(
-                        pd.DataFrame(
-                            samp,
-                            index=forecasts.forecast.index,
-                            columns=forecasts.forecast.columns,
-                        )
-                    )
-                )
-            result_windows = np.array(transformed_array)
+            result_windows = extract_result_windows(forecasts, model_name=model_name)
             lower_forecast = forecasts.lower_forecast
             upper_forecast = forecasts.upper_forecast
         else:
